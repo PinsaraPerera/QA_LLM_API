@@ -1,3 +1,11 @@
+import os 
+import json
+import time
+import uvicorn
+import aiofiles
+from PyPDF2 import PdfReader
+import csv
+
 from langchain_community.llms import CTransformers
 from langchain.chains import QAGenerationChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -11,17 +19,18 @@ from langchain.chains import RetrievalQA
 
 
 def load_llm():
-    # load the locally downloaded model
+    # Load the locally downloaded model here
     llm = CTransformers(
         model = "mistral-7b-instruct-v0.1.Q4_K_S.gguf",
-        model_type = "mistral",
+        model_type="mistral",
         max_new_tokens = 1048,
-        temperature = 0.3,   
+        temperature = 0.3
     )
-
     return llm
 
-def file_preprocessing(file_path):
+def file_processing(file_path):
+
+    # Load data from PDF
     loader = PyPDFLoader(file_path)
     data = loader.load()
 
@@ -29,22 +38,25 @@ def file_preprocessing(file_path):
 
     for page in data:
         question_gen += page.page_content
-
+        
     splitter_ques_gen = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100
+        chunk_size = 1000,
+        chunk_overlap = 100
     )
 
     chunks_ques_gen = splitter_ques_gen.split_text(question_gen)
 
-    document_ques_gen  = [Document(page_content=t) for t in chunks_ques_gen]
+    document_ques_gen = [Document(page_content=t) for t in chunks_ques_gen]
 
-    splitter_answer_gen = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
+    splitter_ans_gen = RecursiveCharacterTextSplitter(
+        chunk_size = 300,
+        chunk_overlap = 30
     )
 
-    document_answer_gen = splitter_answer_gen.split_documents(document_ques_gen)
+
+    document_answer_gen = splitter_ans_gen.split_documents(
+        document_ques_gen
+    )
 
     return document_ques_gen, document_answer_gen
 
@@ -90,51 +102,51 @@ def llm_pipeline(file_path):
     )
 
     REFINE_PROMPT_QUESTIONS = PromptTemplate(
-        input_variables = ["existing_answer", "text"],
-        template = refine_template
+        input_variables=["existing_answer", "text"],
+        template=refine_template,
     )
 
-    ques_gen_chain = load_summarize_chain(
-        llm= llm_ques_gen_pipeline,
-        chain_type="refine",
-        verbose=True,
-        question_prompt = PROMPT_QUESTIONS,
-        refine_prompt= REFINE_PROMPT_QUESTIONS,
-    )
+    ques_gen_chain = load_summarize_chain(llm = llm_ques_gen_pipeline, 
+                                            chain_type = "refine", 
+                                            verbose = True, 
+                                            question_prompt=PROMPT_QUESTIONS, 
+                                            refine_prompt=REFINE_PROMPT_QUESTIONS)
 
     ques = ques_gen_chain.run(document_ques_gen)
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name = "sentence-transformers/all-mpnet-base-v2"
-    )
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
 
-    vector_store = FAISS.from_document(document_answer_gen, embeddings)
+    vector_store = FAISS.from_documents(document_answer_gen, embeddings)
 
     llm_answer_gen = load_llm()
 
-    ques_list = ques.split('\n')
+    ques_list = ques.split("\n")
+    filtered_ques_list = [element for element in ques_list if element.endswith('?') or element.endswith('.')]
 
-    filtered_ques_list = [element for element in ques_list if element.endswith("?") or element.endswith(".")]
-
-    answer_generation_chain = RetrievalQA.from_chain_type(
-        llm = llm_answer_gen,
-        chain_type="stuff",
-        retriever = vector_store.as_retriever(),
-    )
+    answer_generation_chain = RetrievalQA.from_chain_type(llm=llm_answer_gen, 
+                                                chain_type="stuff", 
+                                                retriever=vector_store.as_retriever())
 
     return answer_generation_chain, filtered_ques_list
 
-def get_csv(file_path):
+
+def get_csv (file_path):
     answer_generation_chain, ques_list = llm_pipeline(file_path)
-    base_folder = 'static/output'
+    base_folder = 'static/output/'
     if not os.path.isdir(base_folder):
         os.mkdir(base_folder)
-
-    output_file = base_folder + "QA.csv"
-
-    with open(output_file, 'w', newline= '', encoding= "utf-8") as csvfile:
+    output_file = base_folder+"QA.csv"
+    with open(output_file, "w", newline="", encoding="utf-8") as csvfile:
         csv_writer = csv.writer(csvfile)
-        csv_writer.writerow([ques, answer])
+        csv_writer.writerow(["Question", "Answer"])  # Writing the header row
 
+        for question in ques_list:
+            print("Question: ", question)
+            answer = answer_generation_chain.run(question)
+            print("Answer: ", answer)
+            print("--------------------------------------------------\n\n")
+
+            # Save answer to CSV file
+            csv_writer.writerow([question, answer])
     return output_file
 
